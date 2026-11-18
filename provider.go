@@ -5,19 +5,18 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"time"
 
+	dto "github.com/prometheus/client_model/go"
 	"github.com/virtual-kubelet/aws-fargate/fargate"
-	"github.com/virtual-kubelet/virtual-kubelet/manager"
+	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
 	"github.com/virtual-kubelet/virtual-kubelet/node/api"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	statsv1alpha1 "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
 )
 
 // FargateProvider implements the virtual-kubelet provider interface.
 type FargateProvider struct {
-	resourceManager    *manager.ResourceManager
 	nodeName           string
 	operatingSystem    string
 	internalIP         string
@@ -36,7 +35,6 @@ type FargateProvider struct {
 	executionRoleArn        string
 	cloudWatchLogGroupName  string
 	platformVersion         string
-	lastTransitionTime      time.Time
 }
 
 // Capacity represents the provisioned capacity on a Fargate cluster.
@@ -47,14 +45,10 @@ type capacity struct {
 	pods    string
 }
 
-var (
-	errNotImplemented = fmt.Errorf("not implemented by Fargate provider")
-)
-
 // NewFargateProvider creates a new Fargate provider.
 func NewFargateProvider(
+	ctx context.Context,
 	config string,
-	rm *manager.ResourceManager,
 	nodeName string,
 	operatingSystem string,
 	internalIP string,
@@ -64,7 +58,6 @@ func NewFargateProvider(
 	log.Println("Creating Fargate provider.")
 
 	p := FargateProvider{
-		resourceManager:    rm,
 		nodeName:           nodeName,
 		operatingSystem:    operatingSystem,
 		internalIP:         internalIP,
@@ -93,13 +86,11 @@ func NewFargateProvider(
 		PlatformVersion:         p.platformVersion,
 	}
 
-	p.cluster, err = fargate.NewCluster(context.Background(), &clusterConfig)
+	p.cluster, err = fargate.NewCluster(ctx, &clusterConfig)
 	if err != nil {
 		err = fmt.Errorf("failed to create Fargate cluster: %v", err)
 		return nil, err
 	}
-
-	p.lastTransitionTime = time.Now()
 
 	log.Printf("Created Fargate provider: %+v.", p)
 
@@ -128,7 +119,7 @@ func (p *FargateProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error 
 // UpdatePod takes a Kubernetes Pod and updates it within the provider.
 func (p *FargateProvider) UpdatePod(ctx context.Context, pod *corev1.Pod) error {
 	log.Printf("Received UpdatePod request for %s/%s.\n", pod.Namespace, pod.Name)
-	return errNotImplemented
+	return errdefs.InvalidInput("updating a pod is not supported by the AWS Fargate provider")
 }
 
 // DeletePod takes a Kubernetes Pod and deletes it from the provider.
@@ -175,15 +166,31 @@ func (p *FargateProvider) GetContainerLogs(ctx context.Context, namespace, podNa
 	return p.cluster.GetContainerLogs(ctx, namespace, podName, containerName, opts)
 }
 
-// GetPodFullName retrieves the full pod name as defined in the provider context.
-func (p *FargateProvider) GetPodFullName(namespace string, pod string) string {
-	return ""
-}
-
 // RunInContainer executes a command in a container in the pod, copying data
 // between in/out/err and the container's stdin/stdout/stderr.
 func (p *FargateProvider) RunInContainer(ctx context.Context, namespace, podName, containerName string, cmd []string, attach api.AttachIO) error {
-	return errNotImplemented
+	return errdefs.InvalidInput("exec is not supported by the AWS Fargate provider")
+}
+
+// AttachToContainer attaches to the executing process of a container in the pod.
+func (p *FargateProvider) AttachToContainer(ctx context.Context, namespace, podName, containerName string, attach api.AttachIO) error {
+	return errdefs.InvalidInput("attach is not supported by the AWS Fargate provider")
+}
+
+// PortForward forwards a local port to a port on the pod.
+func (p *FargateProvider) PortForward(ctx context.Context, namespace, pod string, port int32, stream io.ReadWriteCloser) error {
+	return errdefs.InvalidInput("port forwarding is not supported by the AWS Fargate provider")
+}
+
+// GetStatsSummary returns the node's stats summary. Fargate does not report per-pod resource usage to the provider, so
+// the summary names the node and holds no pods.
+func (p *FargateProvider) GetStatsSummary(ctx context.Context) (*statsv1alpha1.Summary, error) {
+	return &statsv1alpha1.Summary{Node: statsv1alpha1.NodeStats{NodeName: p.nodeName}}, nil
+}
+
+// GetMetricsResource returns the node's resource metrics, of which the provider has none.
+func (p *FargateProvider) GetMetricsResource(ctx context.Context) ([]*dto.MetricFamily, error) {
+	return nil, nil
 }
 
 // GetPodStatus retrieves the status of a pod by name from the provider.
@@ -232,10 +239,8 @@ func (p *FargateProvider) GetPods(ctx context.Context) ([]*corev1.Pod, error) {
 	return result, nil
 }
 
-// Capacity returns a resource list with the capacity constraints of the provider.
-func (p *FargateProvider) Capacity(ctx context.Context) corev1.ResourceList {
-	log.Println("Received Capacity request.")
-
+// capacityList returns the capacity the provider advertises for the node.
+func (p *FargateProvider) capacityList() corev1.ResourceList {
 	return corev1.ResourceList{
 		corev1.ResourceCPU:     resource.MustParse(p.capacity.cpu),
 		corev1.ResourceMemory:  resource.MustParse(p.capacity.memory),
@@ -244,95 +249,19 @@ func (p *FargateProvider) Capacity(ctx context.Context) corev1.ResourceList {
 	}
 }
 
-// NodeConditions returns a list of conditions (Ready, OutOfDisk, etc), which is polled
-// periodically to update the node status within Kubernetes.
-func (p *FargateProvider) NodeConditions(ctx context.Context) []corev1.NodeCondition {
-	log.Println("Received NodeConditions request.")
-
-	lastHeartbeatTime := metav1.Now()
-	lastTransitionTime := metav1.NewTime(p.lastTransitionTime)
-	lastTransitionReason := "Fargate cluster is ready"
-	lastTransitionMessage := "ok"
-
-	// Return static thumbs-up values for all conditions.
-	return []corev1.NodeCondition{
-		{
-			Type:               corev1.NodeReady,
-			Status:             corev1.ConditionTrue,
-			LastHeartbeatTime:  lastHeartbeatTime,
-			LastTransitionTime: lastTransitionTime,
-			Reason:             lastTransitionReason,
-			Message:            lastTransitionMessage,
-		},
-		{
-			Type:               corev1.NodeOutOfDisk,
-			Status:             corev1.ConditionFalse,
-			LastHeartbeatTime:  lastHeartbeatTime,
-			LastTransitionTime: lastTransitionTime,
-			Reason:             lastTransitionReason,
-			Message:            lastTransitionMessage,
-		},
-		{
-			Type:               corev1.NodeMemoryPressure,
-			Status:             corev1.ConditionFalse,
-			LastHeartbeatTime:  lastHeartbeatTime,
-			LastTransitionTime: lastTransitionTime,
-			Reason:             lastTransitionReason,
-			Message:            lastTransitionMessage,
-		},
-		{
-			Type:               corev1.NodeDiskPressure,
-			Status:             corev1.ConditionFalse,
-			LastHeartbeatTime:  lastHeartbeatTime,
-			LastTransitionTime: lastTransitionTime,
-			Reason:             lastTransitionReason,
-			Message:            lastTransitionMessage,
-		},
-		{
-			Type:               corev1.NodeNetworkUnavailable,
-			Status:             corev1.ConditionFalse,
-			LastHeartbeatTime:  lastHeartbeatTime,
-			LastTransitionTime: lastTransitionTime,
-			Reason:             lastTransitionReason,
-			Message:            lastTransitionMessage,
-		},
-		{
-			Type:               "KubeletConfigOk",
-			Status:             corev1.ConditionTrue,
-			LastHeartbeatTime:  lastHeartbeatTime,
-			LastTransitionTime: lastTransitionTime,
-			Reason:             lastTransitionReason,
-			Message:            lastTransitionMessage,
-		},
+// ConfigureNode sets the node's capacity, address, kubelet endpoint and operating system before it is registered.
+// The node's conditions are kept by Virtual Kubelet's node controller.
+func (p *FargateProvider) ConfigureNode(ctx context.Context, node *corev1.Node) {
+	node.Status.Capacity = p.capacityList()
+	node.Status.Allocatable = p.capacityList()
+	node.Status.Addresses = []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: p.internalIP}}
+	node.Status.DaemonEndpoints = corev1.NodeDaemonEndpoints{KubeletEndpoint: corev1.DaemonEndpoint{Port: p.daemonEndpointPort}}
+	node.Status.NodeInfo.OperatingSystem = p.operatingSystem
+	node.Status.NodeInfo.Architecture = "amd64"
+	if node.Labels == nil {
+		node.Labels = map[string]string{}
 	}
-}
-
-// NodeAddresses returns a list of addresses for the node status within Kubernetes.
-func (p *FargateProvider) NodeAddresses(ctx context.Context) []corev1.NodeAddress {
-	log.Println("Received NodeAddresses request.")
-
-	return []corev1.NodeAddress{
-		{
-			Type:    corev1.NodeInternalIP,
-			Address: p.internalIP,
-		},
-	}
-}
-
-// NodeDaemonEndpoints returns NodeDaemonEndpoints for the node status within Kubernetes.
-func (p *FargateProvider) NodeDaemonEndpoints(ctx context.Context) *corev1.NodeDaemonEndpoints {
-	log.Println("Received NodeDaemonEndpoints request.")
-
-	return &corev1.NodeDaemonEndpoints{
-		KubeletEndpoint: corev1.DaemonEndpoint{
-			Port: p.daemonEndpointPort,
-		},
-	}
-}
-
-// OperatingSystem returns the operating system the provider is for.
-func (p *FargateProvider) OperatingSystem() string {
-	log.Println("Received OperatingSystem request.")
-
-	return p.operatingSystem
+	node.Labels[corev1.LabelOSStable] = "linux"
+	node.Labels[corev1.LabelArchStable] = "amd64"
+	node.Labels["node.kubernetes.io/exclude-from-external-load-balancers"] = "true"
 }

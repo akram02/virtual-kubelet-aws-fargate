@@ -5,19 +5,20 @@ import (
 	"io"
 	"os"
 
-	"github.com/virtual-kubelet/virtual-kubelet/providers"
-
 	"github.com/BurntSushi/toml"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 const (
+	// operatingSystemLinux is the only operating system the provider runs pods on.
+	operatingSystemLinux = "Linux"
+
 	// Provider configuration defaults.
 	// https://docs.aws.amazon.com/AmazonECS/latest/developerguide/platform_versions.html
 	defaultPlatformVersion         = "LATEST"
 	defaultClusterName             = "default"
 	defaultAssignPublicIPv4Address = false
-	defaultOperatingSystem         = providers.OperatingSystemLinux
+	defaultOperatingSystem         = operatingSystemLinux
 
 	// Default resource capacity advertised by Fargate provider.
 	// These are intentionally low to prevent any accidental overuse.
@@ -92,7 +93,7 @@ func (p *FargateProvider) loadConfig(r io.Reader) error {
 	if config.SecurityGroups == nil {
 		config.SecurityGroups = []string{}
 	}
-	if config.OperatingSystem != providers.OperatingSystemLinux {
+	if config.OperatingSystem != operatingSystemLinux {
 		return fmt.Errorf("Fargate does not support operating system %v", config.OperatingSystem)
 	}
 	if config.CloudWatchLogGroupName != "" && config.ExecutionRoleArn == "" {

@@ -214,8 +214,8 @@ func TestAWSFargateProviderPodLifecycle(t *testing.T) {
 		}
 
 		// Start the Fargate provider.
-		provider, err := vkAWS.NewFargateProvider(
-			tmpfile.Name(), nil, testName, "Linux", "1.2.3.4", 10250)
+		provider, err := vkAWS.NewFargateProvider(context.Background(),
+			tmpfile.Name(), testName, "Linux", "1.2.3.4", 10250)
 		if err != nil {
 			t.Fatal(err)
 		}
