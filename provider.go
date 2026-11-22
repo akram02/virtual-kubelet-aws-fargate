@@ -12,6 +12,7 @@ import (
 	"github.com/virtual-kubelet/virtual-kubelet/node/api"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	corev1listers "k8s.io/client-go/listers/core/v1"
 	statsv1alpha1 "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
 )
 
@@ -35,6 +36,15 @@ type FargateProvider struct {
 	executionRoleArn        string
 	cloudWatchLogGroupName  string
 	platformVersion         string
+
+	// The pods as Kubernetes holds them (Virtual Kubelet's lister), from which a pod's status takes its QoS class.
+	pods corev1listers.PodLister
+}
+
+// UsePodLister gives the provider Kubernetes' view of its pods, which Virtual Kubelet hands every provider
+// (nodeutil.ProviderConfig.Pods).
+func (p *FargateProvider) UsePodLister(pods corev1listers.PodLister) {
+	p.pods = pods
 }
 
 // Capacity represents the provisioned capacity on a Fargate cluster.
@@ -204,6 +214,15 @@ func (p *FargateProvider) GetPodStatus(ctx context.Context, namespace, name stri
 	}
 
 	status := pod.GetStatus(ctx)
+
+	// A current API server refuses a status update that changes status.qosClass, which it set when the pod was made
+	// ("field is immutable"), so the pod would never leave Pending. The class is Kubernetes' own: take it from the pod as
+	// Kubernetes holds it, which also covers a pod this provider found again from its task after a restart.
+	if p.pods != nil {
+		if k8sPod, err := p.pods.Pods(namespace).Get(name); err == nil && k8sPod.Status.QOSClass != "" {
+			status.QOSClass = k8sPod.Status.QOSClass
+		}
+	}
 
 	log.Printf("Responding to GetPodStatus: %+v.\n", status)
 

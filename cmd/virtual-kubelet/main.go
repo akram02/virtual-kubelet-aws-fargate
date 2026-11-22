@@ -354,6 +354,7 @@ func newNode(ctx context.Context, o *opts, client kubernetes.Interface) (*nodeut
 				return nil, nil, err
 			}
 			p.ConfigureNode(ctx, pc.Node)
+			p.UsePodLister(pc.Pods)
 			return p, nil, nil
 		},
 		nodeOpts...,

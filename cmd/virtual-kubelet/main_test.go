@@ -29,6 +29,7 @@ import (
 	is "gotest.tools/assert/cmp"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -165,6 +166,73 @@ SecurityGroups = ["%s"]
 		_, err := client.CoreV1().Pods("default").Get(ctx, "p1", metav1.GetOptions{})
 		return apierrors.IsNotFound(err)
 	})
+}
+
+// TestAPodWithRequestsAndLimitsIsRunningInKubernetes: a pod with resource requests and limits is Burstable, a class the
+// API server sets when the pod is made and refuses to change in a status update ("status.qosClass ... field is
+// immutable"). Its status must keep that class, or the pod stays Pending while its task runs.
+func TestAPodWithRequestsAndLimitsIsRunningInKubernetes(t *testing.T) {
+	client := startAPIServer(t)
+	fakeaws.Isolate(t)
+	ecs := fakeaws.NewECS(t)
+	t.Setenv("AWS_ENDPOINT_URL", ecs.Server.URL)
+
+	providerConfig := filepath.Join(t.TempDir(), "fargate.toml")
+	assert.NilError(t, os.WriteFile(providerConfig, []byte(fmt.Sprintf(`
+Region = "%s"
+ClusterName = "test"
+Subnets = ["%s"]
+SecurityGroups = ["%s"]
+`, fakeaws.Region, fakeaws.Subnet, fakeaws.SecurityGroup)), 0o600))
+	o := defaultOpts()
+	o.nodeName = "vk-test"
+	o.providerConfig = providerConfig
+	o.internalIP = "10.0.0.1"
+	o.certPath, o.keyPath = "", ""
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	vk, err := newNode(ctx, o, client)
+	assert.NilError(t, err)
+	go func() { _ = vk.Run(ctx) }()
+	assert.NilError(t, vk.WaitReady(ctx, time.Minute))
+
+	automount := false
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "sized", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			NodeName:                     "vk-test",
+			AutomountServiceAccountToken: &automount,
+			Tolerations:                  []corev1.Toleration{{Key: "virtual-kubelet.io/provider", Operator: corev1.TolerationOpExists}},
+			Containers: []corev1.Container{{
+				Name:  "web",
+				Image: "public.ecr.aws/docker/library/busybox:latest",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m"), corev1.ResourceMemory: resource.MustParse("1Gi")},
+					Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("2Gi")},
+				},
+			}},
+		},
+	}
+	pod, err = client.CoreV1().Pods("default").Create(ctx, pod, metav1.CreateOptions{})
+	assert.NilError(t, err)
+	assert.Check(t, is.Equal(pod.Status.QOSClass, corev1.PodQOSBurstable), "the API server's own class")
+
+	eventually(t, "the pod to be Running and Ready in Kubernetes", 30*time.Second, func() bool {
+		got, err := client.CoreV1().Pods("default").Get(ctx, "sized", metav1.GetOptions{})
+		if err != nil || got.Status.Phase != corev1.PodRunning {
+			return false
+		}
+		for _, condition := range got.Status.Conditions {
+			if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+				return true
+			}
+		}
+		return false
+	})
+	got, err := client.CoreV1().Pods("default").Get(ctx, "sized", metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.Check(t, is.Equal(got.Status.QOSClass, corev1.PodQOSBurstable))
+	assert.Check(t, is.Equal(ecs.Last("RegisterTaskDefinition").Body["cpu"], "1024"))
 }
 
 // TestNewNodeNeedsProviderConfig: the command refuses to start without a provider configuration file.

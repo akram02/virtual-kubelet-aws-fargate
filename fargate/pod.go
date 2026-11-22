@@ -56,6 +56,10 @@ type Pod struct {
 	taskRefreshTime time.Time
 	taskCPU         int64
 	taskMemory      int64
+	// The QoS class the API server gave the pod when it was made (`status.qosClass`), which a current API server does not
+	// let a status update change; empty for a pod this provider found again from its task, whose class the provider reads
+	// from Kubernetes (provider.go GetPodStatus).
+	qosClass corev1.PodQOSClass
 	containers      map[string]*container
 }
 
@@ -68,6 +72,7 @@ func NewPod(ctx context.Context, cluster *Cluster, pod *corev1.Pod) (*Pod, error
 		uid:        pod.UID,
 		cluster:    cluster,
 		containers: make(map[string]*container),
+		qosClass:   pod.Status.QOSClass,
 	}
 
 	tag := fgPod.buildTaskDefinitionTag()
@@ -514,7 +519,7 @@ func (pod *Pod) getStatus(task *types.Task) corev1.PodStatus {
 		StartTime:             &startTime,
 		InitContainerStatuses: nil,
 		ContainerStatuses:     containerStatuses,
-		QOSClass:              corev1.PodQOSBestEffort,
+		QOSClass:              pod.qosClass,
 	}
 
 	return status
