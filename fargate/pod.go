@@ -85,12 +85,31 @@ func NewPod(ctx context.Context, cluster *Cluster, pod *corev1.Pod) (*Pod, error
 		ContainerDefinitions:    []types.ContainerDefinition{},
 	}
 
+	// Each emptyDir volume is a Fargate bind volume (a volume with a name and no host path), which the task's containers
+	// share. ConfigMap, Secret and other volumes stay unmapped.
+	emptyDirs := map[string]bool{}
+	for _, volume := range pod.Spec.Volumes {
+		if volume.EmptyDir != nil {
+			emptyDirs[volume.Name] = true
+			taskDef.Volumes = append(taskDef.Volumes, types.Volume{Name: aws.String(volume.Name)})
+		}
+	}
+
 	// For each container in the pod...
 	for _, containerSpec := range pod.Spec.Containers {
 		// Create a container definition.
 		cntr, err := newContainer(&containerSpec)
 		if err != nil {
 			return nil, err
+		}
+		for _, mount := range containerSpec.VolumeMounts {
+			if emptyDirs[mount.Name] {
+				cntr.definition.MountPoints = append(cntr.definition.MountPoints, types.MountPoint{
+					SourceVolume:  aws.String(mount.Name),
+					ContainerPath: aws.String(mount.MountPath),
+					ReadOnly:      aws.Bool(mount.ReadOnly),
+				})
+			}
 		}
 
 		// Configure container logs to be sent to CloudWatch Logs if enabled.
