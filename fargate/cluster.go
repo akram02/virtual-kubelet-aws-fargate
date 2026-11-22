@@ -322,9 +322,13 @@ func (c *Cluster) GetContainerLogs(ctx context.Context, namespace, podName, cont
 	logs := ""
 
 	input := &cloudwatchlogs.GetLogEventsInput{
-		Limit:         aws.Int32(int32(opts.Tail)),
 		LogGroupName:  aws.String(c.cloudWatchLogGroupName),
 		LogStreamName: describeResult.LogStreams[0].LogStreamName,
+	}
+	// A tail of 0 is Kubernetes asking for every line (a plain `kubectl logs`): GetLogEvents takes no limit then, since a limit
+	// of 0 is refused (InvalidParameterException: Member must have value greater than or equal to 1).
+	if opts.Tail > 0 {
+		input.Limit = aws.Int32(int32(opts.Tail))
 	}
 	for {
 		page, err := client.logsapi.GetLogEvents(ctx, input)
